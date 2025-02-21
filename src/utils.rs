@@ -1,19 +1,22 @@
-use ark_ec::{pairing::Pairing, VariableBaseMSM};
-use ark_ff::FftField;
-use ark_poly::{
-    domain::DomainCoeff, univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain,
-    Polynomial, Radix2EvaluationDomain,
+use icicle_bls12_381::curve::{
+    CurveCfg, G1Affine, G1Projective as G1, G2Projective as G2, ScalarCfg, ScalarField,
 };
-use ark_serialize::CanonicalSerialize;
-use ark_std::{One, Zero};
+use icicle_bls12_381::polynomials::DensePolynomial;
+use icicle_core::msm;
+use icicle_core::traits::{Arithmetic, FieldImpl};
+use icicle_runtime::memory::{DeviceVec, HostSlice};
+use icicle_runtime::stream::IcicleStream;
 use merlin::Transcript;
+use serde::Serialize;
 use std::ops::Div;
 
 use crate::dealer::CRS;
 
-pub fn hash_to_bytes<T: CanonicalSerialize>(inp: T) -> [u8; 32] {
+/*
+pub fn hash_to_bytes<T: Serialize>(inp: T) -> [u8; 32] {
     let mut bytes = Vec::new();
-    inp.serialize_uncompressed(&mut bytes).unwrap();
+    let mut serializer = serde::Serializer::new(&mut bytes);
+    inp.serialize(&mut serializer).unwrap();
     let hash = blake3::hash(bytes.as_slice());
     let hash_bytes = hash.as_bytes();
     *hash_bytes
@@ -24,23 +27,20 @@ pub fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
-pub fn add_to_transcript<T: CanonicalSerialize>(
-    ts: &mut Transcript,
-    label: &'static [u8],
-    data: T,
-) {
+pub fn add_to_transcript<T: Serialize>(ts: &mut Transcript, label: &'static [u8], data: T) {
     let mut data_bytes = Vec::new();
     data.serialize_uncompressed(&mut data_bytes).unwrap();
     ts.append_message(label, &data_bytes);
 }
+*/
 
 /// given evaluations of a polynomial over given_domain
 /// interpolates the polynomial and evaluates it on target_domain
-pub fn lagrange_interp_eval<F: FftField, T: DomainCoeff<F>>(
-    given_domain: &Vec<F>,
-    target_domain: &Vec<F>,
-    evals: &Vec<T>,
-) -> Vec<T> {
+pub fn lagrange_interp_eval_g2(
+    given_domain: &Vec<ScalarField>,
+    target_domain: &Vec<ScalarField>,
+    evals: &Vec<G2>,
+) -> Vec<G2> {
     debug_assert_eq!(
         given_domain.len(),
         evals.len(),
@@ -49,25 +49,23 @@ pub fn lagrange_interp_eval<F: FftField, T: DomainCoeff<F>>(
 
     let mut result = Vec::new();
     for &point in target_domain.iter() {
-        let mut lagrange_coeffs = vec![F::one(); given_domain.len()];
+        let mut lagrange_coeffs = vec![ScalarField::one(); given_domain.len()];
 
         for i in 0..given_domain.len() {
-            let mut num = F::one();
-            let mut denom = F::one();
+            let mut num = ScalarField::one();
+            let mut denom = ScalarField::one();
             for j in 0..given_domain.len() {
                 if given_domain[i] != given_domain[j] {
-                    num *= point - given_domain[j];
-                    denom *= given_domain[i] - given_domain[j];
+                    num = num * (point - given_domain[j]);
+                    denom = denom * (given_domain[i] - given_domain[j]);
                 }
             }
-            lagrange_coeffs[i] = num / denom;
+            lagrange_coeffs[i] = num * denom.inv();
         }
 
-        let mut point_eval = T::zero();
+        let mut point_eval = G2::zero();
         for i in 0..given_domain.len() {
-            let mut tmp = evals[i];
-            tmp.mul_assign(lagrange_coeffs[i]);
-            point_eval += tmp;
+            point_eval = point_eval + evals[i] * lagrange_coeffs[i];
         }
 
         result.push(point_eval);
@@ -76,32 +74,89 @@ pub fn lagrange_interp_eval<F: FftField, T: DomainCoeff<F>>(
     result
 }
 
+/// given evaluations of a polynomial over given_domain
+/// interpolates the polynomial and evaluates it on target_domain
+pub fn lagrange_interp_eval_scalar(
+    given_domain: &Vec<ScalarField>,
+    target_domain: &Vec<ScalarField>,
+    evals: &Vec<ScalarField>,
+) -> Vec<ScalarField> {
+    debug_assert_eq!(
+        given_domain.len(),
+        evals.len(),
+        "Evals length does not match given_domain length"
+    );
+
+    let mut result = Vec::new();
+    for &point in target_domain.iter() {
+        let mut lagrange_coeffs = vec![ScalarField::one(); given_domain.len()];
+
+        for i in 0..given_domain.len() {
+            let mut num = ScalarField::one();
+            let mut denom = ScalarField::one();
+            for j in 0..given_domain.len() {
+                if given_domain[i] != given_domain[j] {
+                    num = num * (point - given_domain[j]);
+                    denom = denom * (given_domain[i] - given_domain[j]);
+                }
+            }
+            lagrange_coeffs[i] = num * denom.inv();
+        }
+
+        let mut point_eval = ScalarField::zero();
+        for i in 0..given_domain.len() {
+            point_eval = point_eval + evals[i] * lagrange_coeffs[i];
+        }
+
+        result.push(point_eval);
+    }
+
+    result
+}
+
+/*
+
 /// compute KZG opening proof
-pub fn compute_opening_proof<E: Pairing>(
-    crs: &CRS<E>,
-    polynomial: &DensePolynomial<E::ScalarField>,
-    point: &E::ScalarField,
-) -> E::G1 {
-    let eval = polynomial.evaluate(point);
+pub fn compute_opening_proof(crs: &CRS, polynomial: &DensePolynomial, point: ScalarField) -> G1 {
+    let eval = polynomial.evaluate(&point);
     let eval_as_poly = DensePolynomial::from_coefficients_vec(vec![eval]);
     let numerator = polynomial - &eval_as_poly;
     let divisor = DensePolynomial::from_coefficients_vec(vec![
-        E::ScalarField::zero() - point,
-        E::ScalarField::one(),
+        ScalarField::zero() - point,
+        ScalarField::one(),
     ]);
     let witness_polynomial = numerator.div(&divisor);
 
-    <E::G1 as VariableBaseMSM>::msm(&crs.powers_of_g, &witness_polynomial.coeffs()).unwrap()
+    // commit to b in g2
+    let mut pi_on_device = DeviceVec::<G2>::device_malloc(1).unwrap();
+    let deg = witness_polynomial.degree() as usize;
+
+    let g1_stream = IcicleStream::create().unwrap();
+    let mut g1_cfg = msm::MSMConfig::default();
+    g1_cfg.stream_handle = *g1_stream;
+    g1_cfg.is_async = true;
+
+    msm::msm(
+        &witness_polynomial.coeffs_mut_slice()[0..=deg as usize],
+        HostSlice::from_slice(&crs.powers_of_g[0..=deg as usize]),
+        &g1_cfg,
+        &mut pi_on_device[..],
+    )
+    .unwrap();
+
+    let mut pi = vec![G1::zero()];
+    pi_on_device
+        .copy_to_host(HostSlice::from_mut_slice(pi.as_mut_slice()))
+        .unwrap();
+    let pi = pi[0];
+
+    pi
 }
 
 /// Computes all the openings of a KZG commitment in O(n log n) time
 /// See https://github.com/khovratovich/Kate/blob/master/Kate_amortized.pdf
 /// eprint version has a bug and hasn't been updated
-pub fn open_all_values<E: Pairing>(
-    y: &Vec<E::G1Affine>,
-    f: &Vec<E::ScalarField>,
-    domain: &Radix2EvaluationDomain<E::ScalarField>,
-) -> Vec<E::G1> {
+pub fn open_all_values(y: &Vec<G1Affine>, f: &Vec<ScalarField>) -> Vec<G1> {
     let top_domain = Radix2EvaluationDomain::<E::ScalarField>::new(2 * domain.size()).unwrap();
 
     // use FK22 to get all the KZG proofs in O(nlog n) time =======================
@@ -203,3 +258,4 @@ mod tests {
         }
     }
 }
+*/
