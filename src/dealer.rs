@@ -19,7 +19,7 @@ pub struct CRS {
     pub powers_of_g: Vec<G1Affine>,
     pub htau: G2,
 
-    pub y: Vec<G1Affine>, // Preprocessed Toeplitz matrix to compute opening proofs at all points
+    pub y: Vec<G1>, // Preprocessed Toeplitz matrix to compute opening proofs at all points
 }
 
 /// Dealer sets up the CRS and secret shares sk. Assumes the shares are over (1..n) and the secret key is stored at 0
@@ -111,7 +111,6 @@ impl Dealer {
         // share_domain.fft_in_place(&mut sk_shares);
 
         let powers_of_g = powers_of_g.iter().map(|&g| g.into()).collect();
-        let y = y.iter().map(|&g| g.into()).collect();
 
         let crs = CRS {
             g,

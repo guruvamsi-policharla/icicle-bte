@@ -1,39 +1,35 @@
-use ark_ec::{pairing::Pairing, PrimeGroup};
-use ark_ff::{Field, PrimeField};
-use ark_serialize::*;
-use ark_std::UniformRand;
-use merlin::Transcript;
-use retry::{delay::NoDelay, retry};
-
+use crate::icicle_utils::{icicle_to_ark_projective_points, to_ark};
 use crate::utils::{add_to_transcript, hash_to_bytes, xor};
+use icicle_bls12_381::curve::{
+    CurveCfg, G1Affine, G1Projective as G1, G2CurveCfg, G2Projective as G2, ScalarCfg, ScalarField,
+};
+use icicle_core::curve::Curve;
+use icicle_core::traits::FieldImpl;
+use icicle_core::traits::GenerateRandom;
+use merlin::Transcript;
 
-#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Default)]
-pub struct DLogProof<F: PrimeField> {
-    pub c: F,       //challenge
-    pub z_alpha: F, //opening for alpha
-    pub z_beta: F,  //opening for beta
-    pub z_s: F,     //opening for s
+pub struct DLogProof {
+    pub c: ScalarField,       //challenge
+    pub z_alpha: ScalarField, //opening for alpha
+    pub z_beta: ScalarField,  //opening for beta
+    pub z_s: ScalarField,     //opening for s
 }
 
-#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
-pub struct Ciphertext<E: Pairing> {
+pub struct Ciphertext {
     pub ct1: [u8; 32],
-    pub ct2: E::G2,
-    pub ct3: E::G2,
-    pub ct4: E::G2,
-    pub gs: E::G1,
-    pub x: E::ScalarField,
-    pub pi: DLogProof<E::ScalarField>,
+    pub ct2: G2,
+    pub ct3: G2,
+    pub ct4: G2,
+    pub gs: G1,
+    pub x: ScalarField,
+    pub pi: DLogProof,
 }
 
-impl<E: Pairing> Ciphertext<E> {
+impl Ciphertext {
     /// panicks if ciphertext does not verify
-    pub fn verify(&self, htau: E::G2, pk: E::G2) {
-        let g = E::G1::generator();
-        let h = E::G2::generator();
-
+    pub fn verify(&self, htau: G2, pk: G2, g: G1, h: G2) {
         // k2.ct2^c = h^{(tau-x)*z_alpha}, k3.ct3^c = h^{z_alpha} * pk^{z_beta}, k4.ct4^c = h^{z_beta}, and k_s.gs^c = g^{z_s}
-        let minus_c = -self.pi.c;
+        let minus_c = ScalarField::zero() - self.pi.c;
         let recovered_k2 = (htau - (h * self.x)) * self.pi.z_alpha + (self.ct2 * minus_c);
         let recovered_k3 = h * self.pi.z_alpha + pk * self.pi.z_beta + (self.ct3 * minus_c);
         let recovered_k4 = h * self.pi.z_beta + (self.ct4 * minus_c);
@@ -41,64 +37,103 @@ impl<E: Pairing> Ciphertext<E> {
 
         let mut ts: Transcript = Transcript::new(&[0u8]);
         add_to_transcript(&mut ts, b"ct1", self.ct1);
-        add_to_transcript(&mut ts, b"ct2", self.ct2);
-        add_to_transcript(&mut ts, b"ct3", self.ct3);
-        add_to_transcript(&mut ts, b"ct4", self.ct4);
-        add_to_transcript(&mut ts, b"gs", self.gs);
-        add_to_transcript(&mut ts, b"x", self.x);
 
-        add_to_transcript(&mut ts, b"k2", recovered_k2);
-        add_to_transcript(&mut ts, b"k3", recovered_k3);
-        add_to_transcript(&mut ts, b"k4", recovered_k4);
-        add_to_transcript(&mut ts, b"k_s", recovered_k_s);
+        add_to_transcript(
+            &mut ts,
+            b"ct2",
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[self.ct2])
+                [0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"ct3",
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[self.ct3])
+                [0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"ct4",
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[self.ct4])
+                [0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"gs",
+            icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[self.gs])[0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"x",
+            to_ark::<ark_bls12_381::Fr, ScalarField>(&self.x),
+        );
+
+        add_to_transcript(
+            &mut ts,
+            b"k2",
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[
+                recovered_k2,
+            ])[0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"k3",
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[
+                recovered_k3,
+            ])[0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"k4",
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[
+                recovered_k4,
+            ])[0],
+        );
+        add_to_transcript(
+            &mut ts,
+            b"k_s",
+            icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[
+                recovered_k_s,
+            ])[0],
+        );
 
         // Fiat-Shamir to get challenge
         let mut c_bytes = [0u8; 31];
         ts.challenge_bytes(&[8u8], &mut c_bytes);
-        let c = E::ScalarField::from_random_bytes(&c_bytes).unwrap();
+        let c = ScalarField::from_bytes_le(&c_bytes);
 
         // assert that the recomputed challenge matches
         assert_eq!(self.pi.c, c);
     }
 }
 
-pub fn encrypt<E: Pairing>(
+pub fn encrypt(
     msg: [u8; 32],
-    x: E::ScalarField,
-    hid: E::G1,
-    htau: E::G2,
-    pk: E::G2,
-    rng: &mut impl rand::Rng,
-) -> Ciphertext<E> {
-    let g = E::G1::generator();
-    let h = E::G2::generator();
-
-    // hash element S to curve to get tg
-    // retry if bytes cannot be converted to a field element
-    let result = retry(NoDelay, || {
-        let s = E::ScalarField::rand(rng);
-        let gs = g * s;
-        let hgs = hash_to_bytes(gs);
-        let tg_option = E::ScalarField::from_random_bytes(&hgs);
-
-        match tg_option {
-            Some(tg) => Ok((s, gs, tg)),
-            None => {
-                #[cfg(debug_assertions)]
-                {
-                    dbg!("Failed to hash to field element, retrying...");
-                }
-                Err(())
-            }
-        }
-    });
-
-    let (s, gs, tg) = result.unwrap();
+    x: ScalarField,
+    hid: G1,
+    htau: G2,
+    pk: G2,
+    g: G1,
+    h: G2,
+) -> Ciphertext {
+    let s = ScalarCfg::generate_random(1)[0];
+    let gs = g * s;
+    let ark_gs = icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[gs])[0];
+    let hgs = hash_to_bytes(ark_gs);
+    let tg = ScalarField::from_bytes_le(&hgs);
 
     // compute mask
-    let alpha = E::ScalarField::rand(rng);
-    let beta = E::ScalarField::rand(rng);
-    let mask = E::pairing(hid - (g * tg), h) * alpha; //e(H(id)/g^tg, h)^alpha
+    let alpha = ScalarCfg::generate_random(1)[0];
+    let beta = ScalarCfg::generate_random(1)[0];
+
+    let lhs = (hid - (g * tg)) * alpha;
+    let rhs = h;
+
+    let mask = <ark_ec::bls12::Bls12<ark_bls12_381::Config> as ark_ec::pairing::Pairing>::pairing(
+        icicle_to_ark_projective_points(&[lhs])[0],
+        icicle_to_ark_projective_points(&[rhs])[0],
+    ); //e(H(id)/g^tg, h)^alpha
+
+    // let mask = E::pairing(hid - (g * tg), h) * alpha; //e(H(id)/g^tg, h)^alpha
     let hmask = hash_to_bytes(mask);
 
     // xor msg and hmask
@@ -113,9 +148,9 @@ pub fn encrypt<E: Pairing>(
     // prover sends z_alpha = r_alpha + c*alpha, z_beta = r_beta + c*beta, and z_s = r_s + c*s
     // verifier checks that k2.ct2^c = h^{(tau-x)*z_alpha}, k3.ct3^c = h^{z_alpha} * pk^{z_beta}, k4.ct4^c = h^{z_beta}, and k_s.gs^c = g^{z_s}
 
-    let r_alpha = E::ScalarField::rand(rng);
-    let r_beta = E::ScalarField::rand(rng);
-    let r_s = E::ScalarField::rand(rng);
+    let r_alpha = ScalarCfg::generate_random(1)[0];
+    let r_beta = ScalarCfg::generate_random(1)[0];
+    let r_s = ScalarCfg::generate_random(1)[0];
 
     let k2 = (htau - (h * x)) * r_alpha;
     let k3 = h * r_alpha + pk * r_beta;
@@ -124,21 +159,53 @@ pub fn encrypt<E: Pairing>(
 
     let mut ts: Transcript = Transcript::new(&[0u8]);
     add_to_transcript(&mut ts, b"ct1", ct1);
-    add_to_transcript(&mut ts, b"ct2", ct2);
-    add_to_transcript(&mut ts, b"ct3", ct3);
-    add_to_transcript(&mut ts, b"ct4", ct4);
-    add_to_transcript(&mut ts, b"gs", gs);
-    add_to_transcript(&mut ts, b"x", x);
+    add_to_transcript(
+        &mut ts,
+        b"ct2",
+        icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[ct2])[0],
+    );
+    add_to_transcript(
+        &mut ts,
+        b"ct3",
+        icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[ct3])[0],
+    );
+    add_to_transcript(
+        &mut ts,
+        b"ct4",
+        icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[ct4])[0],
+    );
+    add_to_transcript(
+        &mut ts,
+        b"gs",
+        icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[gs])[0],
+    );
+    add_to_transcript(&mut ts, b"x", to_ark::<ark_bls12_381::Fr, ScalarField>(&x));
 
-    add_to_transcript(&mut ts, b"k2", k2);
-    add_to_transcript(&mut ts, b"k3", k3);
-    add_to_transcript(&mut ts, b"k4", k4);
-    add_to_transcript(&mut ts, b"k_s", k_s);
+    add_to_transcript(
+        &mut ts,
+        b"k2",
+        icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[k2])[0],
+    );
+    add_to_transcript(
+        &mut ts,
+        b"k3",
+        icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[k3])[0],
+    );
+    add_to_transcript(
+        &mut ts,
+        b"k4",
+        icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[k4])[0],
+    );
+    add_to_transcript(
+        &mut ts,
+        b"k_s",
+        icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[k_s])[0],
+    );
 
     // Fiat-Shamir to get challenge
     let mut c_bytes = [0u8; 31];
     ts.challenge_bytes(&[8u8], &mut c_bytes);
-    let c = E::ScalarField::from_random_bytes(&c_bytes).unwrap();
+    let c = ScalarField::from_bytes_le(&c_bytes);
 
     let z_alpha = r_alpha + c * alpha;
     let z_beta = r_beta + c * beta;
@@ -164,62 +231,32 @@ pub fn encrypt<E: Pairing>(
 
 #[cfg(test)]
 mod tests {
-    use crate::dealer::Dealer;
+    use icicle_core::ntt::{self, initialize_domain};
 
     use super::*;
-    use ark_bls12_381::Bls12_381;
-    use ark_ec::bls12::Bls12;
-    use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-    use rand::thread_rng;
-
-    type E = Bls12_381;
-    type Fr = <Bls12<ark_bls12_381::Config> as Pairing>::ScalarField;
-    type G1 = <Bls12<ark_bls12_381::Config> as Pairing>::G1;
-    type G2 = <Bls12<ark_bls12_381::Config> as Pairing>::G2;
+    use crate::dealer::Dealer;
 
     #[test]
     fn test_encryption() {
-        let mut rng = thread_rng();
-
         let batch_size = 1 << 5;
         let n = 1 << 4;
-        let tx_domain = Radix2EvaluationDomain::<Fr>::new(batch_size).unwrap();
 
-        let mut dealer = Dealer::<E>::new(batch_size, n, n / 2 - 1);
-        let (crs, _) = dealer.setup(&mut rng);
-        let pk = dealer.get_pk();
+        initialize_domain(
+            ntt::get_root_of_unity::<ScalarField>((2 * batch_size).try_into().unwrap()),
+            &ntt::NTTInitDomainConfig::default(),
+        )
+        .unwrap();
+
+        let mut dealer = Dealer::new(batch_size, n, n / 2 - 1);
+        let (crs, _) = dealer.setup();
+        let pk = crs.h * dealer.sk;
 
         let msg = [1u8; 32];
-        let x = tx_domain.group_gen;
+        let rou = ntt::get_root_of_unity::<ScalarField>(batch_size.try_into().unwrap());
 
-        let hid = G1::rand(&mut rng);
-        let rng = &mut thread_rng();
-        let ct = encrypt::<Bls12_381>(msg, x, hid, crs.htau, pk, rng);
+        let hid = CurveCfg::generate_random_projective_points(1)[0];
+        let ct = encrypt(msg, rou, hid, crs.htau, pk, crs.g, crs.h);
 
-        let mut ct_bytes = Vec::new();
-        ct.serialize_compressed(&mut ct_bytes).unwrap();
-        println!("Compressed ciphertext: {} bytes", ct_bytes.len());
-
-        let mut ct_bytes = Vec::new();
-        ct.serialize_uncompressed(&mut ct_bytes).unwrap();
-        println!("Uncompressed ciphertext: {} bytes", ct_bytes.len());
-
-        let mut g1_bytes = Vec::new();
-        let mut g2_bytes = Vec::new();
-        let mut fr_bytes = Vec::new();
-
-        let g = G1::generator();
-        let h = G2::generator();
-        let x = tx_domain.group_gen;
-
-        g.serialize_compressed(&mut g1_bytes).unwrap();
-        h.serialize_compressed(&mut g2_bytes).unwrap();
-        x.serialize_compressed(&mut fr_bytes).unwrap();
-
-        println!("G1 len: {} bytes", g1_bytes.len());
-        println!("G2 len: {} bytes", g2_bytes.len());
-        println!("Fr len: {} bytes", fr_bytes.len());
-
-        ct.verify(crs.htau, pk);
+        ct.verify(crs.htau, pk, crs.g, crs.h);
     }
 }

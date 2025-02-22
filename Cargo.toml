@@ -13,10 +13,8 @@ ark-bls12-381 = { version = "0.5.0" }
 
 blake3 = { version = "1.0", default-features = false }
 merlin = { version = "3.0", default-features = false }
-retry = { version = "2.0", default-features = false }
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = { version = "0.9" }
-serde = { version = "1.0", features = ["derive"] }
 
 # icicle imports
 icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", branch = "main" }
