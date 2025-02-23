@@ -114,6 +114,10 @@ pub fn encrypt(
     g: G1,
     h: G2,
 ) -> Ciphertext {
+    // PPEs
+    // 1. e(com * g^{-tg},h) = e(pi, h^{tau - x})
+    // 2. e(hid * com^{-1},pk) = e(sigma, h)
+
     let s = ScalarCfg::generate_random(1)[0];
     let gs = g * s;
     let ark_gs = icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[gs])[0];
@@ -132,13 +136,12 @@ pub fn encrypt(
         icicle_to_ark_projective_points(&[rhs])[0],
     ); //e(H(id)/g^tg, h)^alpha
 
-    // let mask = E::pairing(hid - (g * tg), h) * alpha; //e(H(id)/g^tg, h)^alpha
     let hmask = hash_to_bytes(mask);
 
     // xor msg and hmask
     let ct1: [u8; 32] = xor(&msg, &hmask).as_slice().try_into().unwrap();
     let ct2 = (htau - (h * x)) * alpha; //h^{(tau-x)*alpha}
-    let ct3 = h * alpha + pk * beta; //h^alpha * pk^beta
+    let ct3 = (h * alpha) + (pk * beta); //h^alpha * pk^beta
     let ct4 = h * beta; //h^beta
 
     // prove knowledge of alpha, beta, and s such that ct2  = h^{(tau-x)*alpha}, ct3 = h^alpha * pk^beta, ct4 = h^beta, and gs = g^s

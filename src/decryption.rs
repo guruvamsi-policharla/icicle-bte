@@ -1,52 +1,47 @@
-use ark_ec::{pairing::Pairing, PrimeGroup, VariableBaseMSM};
-use ark_ff::Field;
-use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use ark_serialize::*;
-use ark_std::Zero;
+use icicle_bls12_381::curve::{
+    CurveCfg, G1Projective as G1, G2CurveCfg, G2Projective as G2, ScalarField,
+};
+use icicle_bls12_381::polynomials::DensePolynomial;
+use icicle_core::ntt;
+use icicle_core::polynomials::UnivariatePolynomial;
+use icicle_core::traits::FieldImpl;
+use icicle_runtime::memory::{DeviceVec, HostSlice};
 use std::collections::BTreeMap;
 
+use crate::icicle_utils::icicle_to_ark_projective_points;
+use crate::utils::commit_poly_evals;
 use crate::{
     dealer::CRS,
     encryption::Ciphertext,
-    utils::{hash_to_bytes, lagrange_interp_eval, open_all_values, xor},
+    utils::{hash_to_bytes, lagrange_interp_eval_g1, open_all_values, xor},
 };
-
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
-pub struct SecretKey<E: Pairing> {
-    sk_share: E::ScalarField,
+use ark_ff::Zero;
+pub struct SecretKey {
+    sk_share: ScalarField,
 }
 
-impl<E: Pairing> SecretKey<E> {
-    pub fn new(sk_share: E::ScalarField) -> Self {
+impl SecretKey {
+    pub fn new(sk_share: ScalarField) -> Self {
         SecretKey { sk_share }
     }
 
-    pub fn get_pk(&self) -> E::G2 {
-        E::G2::generator() * self.sk_share
-    }
-
     /// each party in the committee computes a partial decryption
-    pub fn partial_decrypt(
-        &self,
-        ct: &Vec<Ciphertext<E>>,
-        hid: E::G1,
-        pk: E::G2,
-        crs: &CRS<E>,
-    ) -> E::G1 {
+    pub fn partial_decrypt(&self, ct: &Vec<Ciphertext>, hid: G1, pk: G2, crs: &CRS) -> G1 {
         let batch_size = crs.powers_of_g.len();
         for i in 0..batch_size {
-            ct[i].verify(crs.htau, pk);
+            ct[i].verify(crs.htau, pk, crs.g, crs.h);
         }
 
-        let tx_domain = Radix2EvaluationDomain::<E::ScalarField>::new(batch_size).unwrap();
-
-        let mut fevals = vec![E::ScalarField::zero(); batch_size];
+        let mut fevals = vec![ScalarField::zero(); batch_size];
         for i in 0..batch_size {
-            let tg_bytes = hash_to_bytes(ct[i].gs);
-            fevals[i] = E::ScalarField::from_random_bytes(&tg_bytes).unwrap();
+            let tg_bytes = hash_to_bytes(
+                icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[ct[i].gs])
+                    [0],
+            );
+            fevals[i] = ScalarField::from_bytes_le(&tg_bytes[0..31]);
         }
-        let fcoeffs = tx_domain.ifft(&fevals);
-        let com = <E::G1 as VariableBaseMSM>::msm(&crs.powers_of_g, &fcoeffs).unwrap();
+
+        let com = commit_poly_evals(&crs, &fevals);
         let delta = hid - com;
 
         let pd = delta * self.sk_share;
@@ -56,52 +51,75 @@ impl<E: Pairing> SecretKey<E> {
 }
 
 /// aggregate partial decryptions into a signature on H(id)/com
-pub fn aggregate_partial_decryptions<G: PrimeGroup>(partial_decryptions: &BTreeMap<usize, G>) -> G {
+pub fn aggregate_partial_decryptions(partial_decryptions: &BTreeMap<usize, G1>) -> G1 {
     // interpolate partial decryptions to recover the signature
     let mut evals = Vec::new();
     let mut eval_points = Vec::new();
     // Iterate over the map and collect keys and values
     for (&key, &value) in partial_decryptions.iter() {
         evals.push(value);
-        eval_points.push(G::ScalarField::from(key as u64));
+        eval_points.push(ScalarField::from_u32(key as u32));
     }
 
-    let sigma = lagrange_interp_eval(&eval_points, &vec![G::ScalarField::zero()], &evals)[0];
+    let sigma = lagrange_interp_eval_g1(&eval_points, &vec![ScalarField::zero()], &evals)[0];
 
     sigma
 }
 
 /// decrypts all the ciphertexts in a batch
-pub fn decrypt_all<E: Pairing>(
-    sigma: E::G1,
-    ct: &Vec<Ciphertext<E>>,
-    hid: E::G1,
-    crs: &CRS<E>,
-) -> Vec<[u8; 32]> {
+pub fn decrypt_all(sigma: G1, ct: &Vec<Ciphertext>, hid: G1, crs: &CRS) -> Vec<[u8; 32]> {
     let batch_size = ct.len();
 
-    let tx_domain = Radix2EvaluationDomain::<E::ScalarField>::new(batch_size).unwrap();
-
     // compute fevals by hashing gs of the ciphertexts to get fevals
-    let mut fevals = vec![E::ScalarField::zero(); batch_size];
+    let mut fevals = vec![ScalarField::zero(); batch_size];
     for i in 0..batch_size {
-        let tg_bytes = hash_to_bytes(ct[i].gs);
-        fevals[i] = E::ScalarField::from_random_bytes(&tg_bytes).unwrap();
+        let tg_bytes = hash_to_bytes(
+            icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[ct[i].gs])[0],
+        );
+        fevals[i] = ScalarField::from_bytes_le(&tg_bytes[0..31]);
     }
 
-    let fcoeffs = tx_domain.ifft(&fevals);
-
-    let com = <E::G1 as VariableBaseMSM>::msm(&crs.powers_of_g, &fcoeffs).unwrap();
+    let com = commit_poly_evals(&crs, &fevals);
     let delta = hid - com;
 
     // use FK22 to get all the KZG proofs in O(nlog n) time =======================
-    let pi = open_all_values::<E>(&crs.y, &fcoeffs, &tx_domain);
+    let mut ntt_result = DeviceVec::<ScalarField>::device_malloc(batch_size).unwrap();
+    let ntt_cfg = ntt::NTTConfig::<ScalarField>::default();
+    ntt::ntt(
+        HostSlice::from_slice(&fevals),
+        ntt::NTTDir::kInverse,
+        &ntt_cfg,
+        &mut ntt_result[..],
+    )
+    .unwrap();
+
+    let mut fcoeffs = vec![ScalarField::zero(); batch_size];
+    ntt_result
+        .copy_to_host(HostSlice::from_mut_slice(fcoeffs.as_mut_slice()))
+        .unwrap();
+
+    let pi = open_all_values(&crs.y, &fcoeffs, batch_size);
 
     // now decrypt each of the ciphertexts as m = ct(1) xor H(e(delta,ct2).e(pi,ct3)e(-sigma,ct4))
     let mut m = vec![[0u8; 32]; batch_size];
     for i in 0..batch_size {
-        let mask = E::multi_miller_loop([pi[i], delta, -sigma], [ct[i].ct2, ct[i].ct3, ct[i].ct4]);
-        let mask = E::final_exponentiation(mask).unwrap();
+        let ark_g1_terms =
+            icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[
+                pi[i],
+                delta,
+                G1::zero() - sigma,
+            ]);
+
+        let ark_g2_terms =
+            icicle_to_ark_projective_points::<ark_bls12_381::g2::Config, G2CurveCfg>(&[
+                ct[i].ct2, ct[i].ct3, ct[i].ct4,
+            ]);
+
+        let mask = <ark_ec::bls12::Bls12<ark_bls12_381::Config> as ark_ec::pairing::Pairing>::multi_miller_loop(
+            &ark_g1_terms,
+            &ark_g2_terms,
+        );
+        let mask = <ark_ec::bls12::Bls12<ark_bls12_381::Config> as ark_ec::pairing::Pairing>::final_exponentiation(mask).unwrap();
 
         let hmask = hash_to_bytes(mask);
         m[i] = xor(&ct[i].ct1, &hmask).as_slice().try_into().unwrap();
