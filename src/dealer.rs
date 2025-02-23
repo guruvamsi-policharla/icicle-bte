@@ -1,15 +1,15 @@
-use std::iter;
-// use crate::encryption::Ciphertext;
-// use crate::{icicle_utils::icicle_to_ark_affine_points, utils::lagrange_poly};
 use icicle_bls12_381::curve::{
     CurveCfg, G1Affine, G1Projective as G1, G2CurveCfg, G2Projective as G2, ScalarCfg, ScalarField,
 };
+use icicle_bls12_381::polynomials::DensePolynomial;
 use icicle_core::curve::Curve;
+use icicle_core::polynomials::UnivariatePolynomial;
 use icicle_core::traits::FieldImpl;
 use icicle_core::{ntt, traits::GenerateRandom};
 use icicle_runtime::memory::{DeviceVec, HostSlice};
+use std::iter;
 
-use crate::utils::lagrange_interp_eval_scalar;
+use crate::utils::{lagrange_interp_eval_scalar, lagrange_poly};
 
 #[derive(Clone)]
 pub struct CRS {
@@ -17,6 +17,7 @@ pub struct CRS {
     pub h: G2,
 
     pub powers_of_g: Vec<G1Affine>,
+    pub lagrange_powers_of_g: Vec<G1Affine>,
     pub htau: G2,
 
     pub y: Vec<G1>, // Preprocessed Toeplitz matrix to compute opening proofs at all points
@@ -62,6 +63,18 @@ impl Dealer {
         }
 
         let htau = h * tau;
+
+        // Lagrange Powers
+        let mut li_evals: Vec<ScalarField> = vec![ScalarField::zero(); self.batch_size];
+        for i in 0..self.batch_size {
+            let li: DensePolynomial = lagrange_poly(self.batch_size, i); //get the i-th lagrange polynomial
+            li_evals[i] = li.eval(&tau);
+        }
+
+        let mut lagrange_powers_of_g = vec![G1::zero().into(); self.batch_size];
+        for i in 0..self.batch_size {
+            lagrange_powers_of_g[i] = (g * li_evals[i]).into();
+        }
 
         // Compute the Toeplitz matrix preprocessing ==================================================
         let mut top_tau = powers_of_tau.clone();
@@ -116,6 +129,7 @@ impl Dealer {
             g,
             h,
             powers_of_g,
+            lagrange_powers_of_g,
             htau,
             y,
         };
@@ -128,7 +142,7 @@ impl Dealer {
 mod tests {
     use icicle_core::ntt::initialize_domain;
 
-    use crate::utils::lagrange_interp_eval_g2;
+    use crate::utils::lagrange_interp_eval_g1;
 
     use super::*;
 
@@ -154,14 +168,14 @@ mod tests {
             lagrange_interp_eval_scalar(&share_domain, &vec![ScalarField::zero()], &sk_shares)[0];
         assert_eq!(dealer.sk, should_be_sk);
 
-        let pk = crs.h * dealer.sk;
-        let should_be_pk = crs.h * should_be_sk;
+        let pk = crs.g * dealer.sk;
+        let should_be_pk = crs.g * should_be_sk;
         assert_eq!(pk, should_be_pk);
 
-        let g_sk_shares = sk_shares.iter().map(|&ski| crs.h * ski).collect::<Vec<_>>();
+        let g_sk_shares = sk_shares.iter().map(|&ski| crs.g * ski).collect::<Vec<_>>();
 
         let interp_pk =
-            lagrange_interp_eval_g2(&share_domain, &vec![ScalarField::zero()], &g_sk_shares)[0];
+            lagrange_interp_eval_g1(&share_domain, &vec![ScalarField::zero()], &g_sk_shares)[0];
         assert_eq!(pk, interp_pk);
 
         assert_eq!(crs.powers_of_g.len(), batch_size);
