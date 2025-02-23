@@ -17,9 +17,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 rand = { version = "0.9" }
 
 # icicle imports
-icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", branch = "main" }
-icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", branch = "main" }
-icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", branch = "main" }
+icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v3.5.0" }
+icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v3.5.0" }
+icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v3.5.0" }
 rayon = "1.5"
 
 [[bench]]
