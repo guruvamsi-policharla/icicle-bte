@@ -22,8 +22,16 @@ icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v3.5.
 icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v3.5.0" }
 rayon = "1.5"
 
+
+[features]
+cuda = ["icicle-runtime/cuda_backend", "icicle-bls12-381/cuda_backend"]
+
 [[bench]]
 name = "decrypt_all"
+harness = false
+
+[[bench]]
+name = "open_all"
 harness = false
 
 [profile.dev]
