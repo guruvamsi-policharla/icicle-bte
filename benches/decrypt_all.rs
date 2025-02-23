@@ -1,50 +1,51 @@
-use std::collections::BTreeMap;
-
-use ark_bls12_381::Bls12_381;
-use ark_ec::pairing::Pairing;
-use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use ark_std::UniformRand;
-use batch_threshold::{
+use icicle_bls12_381::curve::{CurveCfg, G1Projective as G1, ScalarField};
+use icicle_bte::{
     dealer::Dealer,
     decryption::{aggregate_partial_decryptions, decrypt_all, SecretKey},
     encryption::{encrypt, Ciphertext},
 };
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use rand::thread_rng;
+use icicle_core::ntt::{self, initialize_domain};
+use icicle_core::{curve::Curve, traits::FieldImpl};
+use std::collections::BTreeMap;
 
-type E = Bls12_381;
-type Fr = <E as Pairing>::ScalarField;
-type G1 = <E as Pairing>::G1;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 fn bench_decrypt_all(c: &mut Criterion) {
-    let mut rng = thread_rng();
-
     let n = 1 << 4;
     let mut group = c.benchmark_group("decrypt_all");
     group.sample_size(20);
 
-    for size in 2..=10 {
+    let max_log_size = 10;
+    initialize_domain(
+        ntt::get_root_of_unity::<ScalarField>((2 * (1 << max_log_size)).try_into().unwrap()),
+        &ntt::NTTInitDomainConfig::default(),
+    )
+    .unwrap();
+
+    for size in 5..=max_log_size {
         let batch_size = 1 << size;
 
-        let mut dealer = Dealer::<E>::new(batch_size, n, n / 2 - 1);
-        let (crs, sk_shares) = dealer.setup(&mut rng);
-        let pk = dealer.get_pk();
+        let mut dealer = Dealer::new(batch_size, n, n / 2 - 1);
+        let (crs, sk_shares) = dealer.setup();
+        let pk = crs.h * dealer.sk;
 
-        let mut secret_key: Vec<SecretKey<E>> = Vec::new();
+        let mut secret_key: Vec<SecretKey> = Vec::new();
         for i in 0..n {
             secret_key.push(SecretKey::new(sk_shares[i]));
         }
-
         let msg = [1u8; 32];
+        let rou = ntt::get_root_of_unity::<ScalarField>(batch_size.try_into().unwrap());
+        let mut domain_elements: Vec<ScalarField> = vec![ScalarField::one()];
+        for i in 1..batch_size {
+            domain_elements.push(domain_elements[i - 1] * rou);
+        }
 
-        let hid = G1::rand(&mut rng);
-
-        let tx_domain = Radix2EvaluationDomain::<Fr>::new(batch_size).unwrap();
+        let hid = CurveCfg::generate_random_projective_points(1)[0];
 
         // generate ciphertexts for all points in tx_domain
-        let mut ct: Vec<Ciphertext<E>> = Vec::new();
-        for x in tx_domain.elements() {
-            ct.push(encrypt::<E>(msg, x, hid, crs.htau, pk, &mut rng));
+        let mut ct: Vec<Ciphertext> = Vec::new();
+        for x in domain_elements {
+            ct.push(encrypt(msg, x, hid, crs.htau, pk, crs.g, crs.h));
         }
 
         // generate partial decryptions
@@ -55,6 +56,12 @@ fn bench_decrypt_all(c: &mut Criterion) {
         }
 
         let sigma = aggregate_partial_decryptions(&partial_decryptions);
+
+        // verify that ciphertexts are well formed
+        for i in 0..batch_size {
+            ct[i].verify(crs.htau, pk, crs.g, crs.h);
+        }
+
         let messages = decrypt_all(sigma, &ct, hid, &crs);
         for i in 0..batch_size {
             assert_eq!(msg, messages[i]);

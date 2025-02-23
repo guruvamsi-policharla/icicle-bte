@@ -23,14 +23,6 @@ icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "
 rayon = "1.5"
 
 [[bench]]
-name = "encryption"
-harness = false
-
-[[bench]]
-name = "partial_decryption"
-harness = false
-
-[[bench]]
 name = "decrypt_all"
 harness = false
 
