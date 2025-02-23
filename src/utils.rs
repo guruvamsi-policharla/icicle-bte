@@ -1,7 +1,5 @@
 use ark_serialize::CanonicalSerialize;
-use icicle_bls12_381::curve::{
-    CurveCfg, G1Affine, G1Projective as G1, G2Projective as G2, ScalarCfg, ScalarField,
-};
+use icicle_bls12_381::curve::{G1Projective as G1, ScalarField};
 use icicle_bls12_381::polynomials::DensePolynomial;
 use icicle_core::ecntt::ecntt_inplace;
 use icicle_core::polynomials::UnivariatePolynomial;
@@ -37,13 +35,25 @@ pub fn add_to_transcript<T: CanonicalSerialize>(
     ts.append_message(label, &data_bytes);
 }
 
+/// 1 at omega^i and 0 elsewhere on domain {omega^i}_{i \in [n]}
+pub fn lagrange_poly(n: usize, i: usize) -> DensePolynomial {
+    debug_assert!(i < n);
+    //todo: check n is a power of 2
+    let mut evals = vec![ScalarField::zero(); n];
+    evals[i] = ScalarField::one();
+
+    let poly = DensePolynomial::from_rou_evals(HostSlice::from_slice(&evals), n);
+
+    poly
+}
+
 /// given evaluations of a polynomial over given_domain
 /// interpolates the polynomial and evaluates it on target_domain
-pub fn lagrange_interp_eval_g2(
+pub fn lagrange_interp_eval_g1(
     given_domain: &Vec<ScalarField>,
     target_domain: &Vec<ScalarField>,
-    evals: &Vec<G2>,
-) -> Vec<G2> {
+    evals: &Vec<G1>,
+) -> Vec<G1> {
     debug_assert_eq!(
         given_domain.len(),
         evals.len(),
@@ -66,7 +76,7 @@ pub fn lagrange_interp_eval_g2(
             lagrange_coeffs[i] = num * denom.inv();
         }
 
-        let mut point_eval = G2::zero();
+        let mut point_eval = G1::zero();
         for i in 0..given_domain.len() {
             point_eval = point_eval + evals[i] * lagrange_coeffs[i];
         }
@@ -129,6 +139,30 @@ pub fn commit_poly(crs: &CRS, polynomial: &mut DensePolynomial) -> G1 {
     msm::msm(
         &polynomial.coeffs_mut_slice()[0..=deg as usize],
         HostSlice::from_slice(&crs.powers_of_g[0..=deg as usize]),
+        &g1_cfg,
+        &mut com_on_device[..],
+    )
+    .unwrap();
+
+    let mut com = vec![G1::zero()];
+    com_on_device
+        .copy_to_host(HostSlice::from_mut_slice(com.as_mut_slice()))
+        .unwrap();
+
+    com[0]
+}
+
+pub fn commit_poly_evals(crs: &CRS, evals: &Vec<ScalarField>) -> G1 {
+    let mut com_on_device = DeviceVec::<G1>::device_malloc(1).unwrap();
+
+    let g1_stream = IcicleStream::create().unwrap();
+    let mut g1_cfg = msm::MSMConfig::default();
+    g1_cfg.stream_handle = *g1_stream;
+    g1_cfg.is_async = true;
+
+    msm::msm(
+        HostSlice::from_slice(&evals),
+        HostSlice::from_slice(&crs.lagrange_powers_of_g[0..evals.len()]),
         &g1_cfg,
         &mut com_on_device[..],
     )
@@ -241,10 +275,9 @@ mod tests {
     use super::*;
     use crate::{dealer::Dealer, icicle_utils::icicle_to_ark_projective_points};
     use ark_ff::Zero;
-    use icicle_core::{
-        ntt::{self, initialize_domain},
-        traits::GenerateRandom,
-    };
+    use icicle_bls12_381::curve::{G2Projective as G2, ScalarCfg};
+    use icicle_core::ntt::{self, initialize_domain};
+    use icicle_core::traits::GenerateRandom;
 
     #[test]
     fn kzg_open_test() {
@@ -258,12 +291,29 @@ mod tests {
         let mut dealer = Dealer::new(domain_size, 1 << 5, domain_size / 2 - 1);
         let (crs, _) = dealer.setup();
 
-        let mut f = DensePolynomial::from_coeffs(
-            HostSlice::from_slice(&ScalarCfg::generate_random(domain_size)),
-            domain_size,
-        );
+        let fcoeffs = ScalarCfg::generate_random(domain_size);
+        let mut f = DensePolynomial::from_coeffs(HostSlice::from_slice(&fcoeffs), domain_size);
+
+        let mut ntt_result = DeviceVec::<ScalarField>::device_malloc(domain_size).unwrap();
+        let ntt_cfg = ntt::NTTConfig::<ScalarField>::default();
+        ntt::ntt(
+            HostSlice::from_slice(&fcoeffs),
+            ntt::NTTDir::kForward,
+            &ntt_cfg,
+            &mut ntt_result[..],
+        )
+        .unwrap();
+
+        let mut fevals = vec![ScalarField::zero(); domain_size];
+        ntt_result
+            .copy_to_host(HostSlice::from_mut_slice(fevals.as_mut_slice()))
+            .unwrap();
 
         let com = commit_poly(&crs, &mut f);
+        let evals_com = commit_poly_evals(&crs, &fevals);
+
+        assert_eq!(com, evals_com);
+
         let point = ScalarCfg::generate_random(1)[0];
 
         let pi = compute_opening_proof(&crs, &f, point);

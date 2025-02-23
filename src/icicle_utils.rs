@@ -1,5 +1,5 @@
 use ark_ec::short_weierstrass::{Affine as ArkAffine, Projective as ArkProjective, SWCurveConfig};
-use ark_ff::{BigInteger, Field, PrimeField};
+use ark_ff::{BigInteger, PrimeField};
 
 use icicle_core::{
     curve::{Affine as IcicleAffine, Curve, Projective as IcicleProjective},

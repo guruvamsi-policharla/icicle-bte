@@ -1,9 +1,8 @@
 use crate::icicle_utils::{icicle_to_ark_projective_points, to_ark};
 use crate::utils::{add_to_transcript, hash_to_bytes, xor};
 use icicle_bls12_381::curve::{
-    CurveCfg, G1Affine, G1Projective as G1, G2CurveCfg, G2Projective as G2, ScalarCfg, ScalarField,
+    CurveCfg, G1Projective as G1, G2CurveCfg, G2Projective as G2, ScalarCfg, ScalarField,
 };
-use icicle_core::curve::Curve;
 use icicle_core::traits::FieldImpl;
 use icicle_core::traits::GenerateRandom;
 use merlin::Transcript;
@@ -119,7 +118,7 @@ pub fn encrypt(
     let gs = g * s;
     let ark_gs = icicle_to_ark_projective_points::<ark_bls12_381::g1::Config, CurveCfg>(&[gs])[0];
     let hgs = hash_to_bytes(ark_gs);
-    let tg = ScalarField::from_bytes_le(&hgs);
+    let tg = ScalarField::from_bytes_le(&hgs[0..31]);
 
     // compute mask
     let alpha = ScalarCfg::generate_random(1)[0];
@@ -235,6 +234,7 @@ mod tests {
 
     use super::*;
     use crate::dealer::Dealer;
+    use icicle_core::curve::Curve;
 
     #[test]
     fn test_encryption() {
