@@ -1,9 +1,7 @@
 use icicle_bls12_381::curve::{
     CurveCfg, G1Projective as G1, G2CurveCfg, G2Projective as G2, ScalarField,
 };
-use icicle_bls12_381::polynomials::DensePolynomial;
 use icicle_core::ntt;
-use icicle_core::polynomials::UnivariatePolynomial;
 use icicle_core::traits::FieldImpl;
 use icicle_runtime::memory::{DeviceVec, HostSlice};
 use std::collections::BTreeMap;
@@ -15,7 +13,6 @@ use crate::{
     encryption::Ciphertext,
     utils::{hash_to_bytes, lagrange_interp_eval_g1, open_all_values, xor},
 };
-use ark_ff::Zero;
 pub struct SecretKey {
     sk_share: ScalarField,
 }

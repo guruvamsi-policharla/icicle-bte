@@ -3,7 +3,6 @@ use icicle_bte::{
     dealer::Dealer,
     decryption::{aggregate_partial_decryptions, decrypt_all, SecretKey},
     encryption::{encrypt, Ciphertext},
-    icicle_utils::icicle_to_ark_projective_points,
 };
 use icicle_core::ntt::{self, initialize_domain};
 use icicle_core::{curve::Curve, traits::FieldImpl};
