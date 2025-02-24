@@ -1,3 +1,4 @@
+use crate::dealer::CRS;
 use ark_serialize::CanonicalSerialize;
 use icicle_bls12_381::curve::{G1Projective as G1, ScalarField};
 use icicle_bls12_381::polynomials::DensePolynomial;
@@ -8,9 +9,9 @@ use icicle_core::{msm, ntt};
 use icicle_runtime::memory::{DeviceVec, HostSlice};
 use icicle_runtime::stream::IcicleStream;
 use merlin::Transcript;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator};
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use std::ops::Div;
-
-use crate::dealer::CRS;
 
 pub fn hash_to_bytes<T: CanonicalSerialize>(inp: T) -> [u8; 32] {
     let mut bytes = Vec::new();
@@ -131,7 +132,7 @@ pub fn commit_poly(crs: &CRS, polynomial: &mut DensePolynomial) -> G1 {
     let mut com_on_device = DeviceVec::<G1>::device_malloc(1).unwrap();
     let deg = polynomial.degree() as usize;
 
-    let g1_stream = IcicleStream::create().unwrap();
+    let mut g1_stream = IcicleStream::create().unwrap();
     let mut g1_cfg = msm::MSMConfig::default();
     g1_cfg.stream_handle = *g1_stream;
     g1_cfg.is_async = true;
@@ -149,13 +150,15 @@ pub fn commit_poly(crs: &CRS, polynomial: &mut DensePolynomial) -> G1 {
         .copy_to_host(HostSlice::from_mut_slice(com.as_mut_slice()))
         .unwrap();
 
+    g1_stream.destroy().unwrap();
+
     com[0]
 }
 
 pub fn commit_poly_evals(crs: &CRS, evals: &Vec<ScalarField>) -> G1 {
     let mut com_on_device = DeviceVec::<G1>::device_malloc(1).unwrap();
 
-    let g1_stream = IcicleStream::create().unwrap();
+    let mut g1_stream = IcicleStream::create().unwrap();
     let mut g1_cfg = msm::MSMConfig::default();
     g1_cfg.stream_handle = *g1_stream;
     g1_cfg.is_async = true;
@@ -172,6 +175,8 @@ pub fn commit_poly_evals(crs: &CRS, evals: &Vec<ScalarField>) -> G1 {
     com_on_device
         .copy_to_host(HostSlice::from_mut_slice(com.as_mut_slice()))
         .unwrap();
+
+    g1_stream.destroy().unwrap();
 
     com[0]
 }
@@ -192,7 +197,7 @@ pub fn compute_opening_proof(crs: &CRS, polynomial: &DensePolynomial, point: Sca
     let mut pi_on_device = DeviceVec::<G1>::device_malloc(1).unwrap();
     let deg = witness_polynomial.degree() as usize;
 
-    let g1_stream = IcicleStream::create().unwrap();
+    let mut g1_stream = IcicleStream::create().unwrap();
     let mut g1_cfg = msm::MSMConfig::default();
     g1_cfg.stream_handle = *g1_stream;
     g1_cfg.is_async = true;
@@ -211,6 +216,8 @@ pub fn compute_opening_proof(crs: &CRS, polynomial: &DensePolynomial, point: Sca
         .unwrap();
     let pi = pi[0];
 
+    g1_stream.destroy().unwrap();
+
     pi
 }
 
@@ -226,26 +233,25 @@ pub fn open_all_values(y: &Vec<G1>, f: &Vec<ScalarField>, batch_size: usize) -> 
 
     debug_assert_eq!(v.len(), 2 * batch_size);
 
-    let mut ntt_result = DeviceVec::<ScalarField>::device_malloc(2 * batch_size).unwrap();
+    let mut v_dev = DeviceVec::<ScalarField>::device_malloc(2 * batch_size).unwrap();
+    v_dev.copy_from_host(HostSlice::from_slice(&v)).unwrap();
+
     let ntt_cfg = ntt::NTTConfig::<ScalarField>::default();
-    ntt::ntt(
-        HostSlice::from_slice(&v),
-        ntt::NTTDir::kForward,
-        &ntt_cfg,
-        &mut ntt_result[..],
-    )
-    .unwrap();
+    ntt::ntt_inplace(&mut v_dev, ntt::NTTDir::kForward, &ntt_cfg).unwrap();
 
     let mut fft_v = vec![ScalarField::zero(); 2 * batch_size];
-    ntt_result
+    v_dev
         .copy_to_host(HostSlice::from_mut_slice(fft_v.as_mut_slice()))
         .unwrap();
 
     // h = y \odot v
     let mut h = vec![G1::zero(); 2 * batch_size];
-    for i in 0..2 * batch_size {
-        h[i] = y[i] * fft_v[i];
-    }
+    h.par_iter_mut()
+        .zip(fft_v.par_iter())
+        .zip(y.par_iter())
+        .for_each(|((h_i, &fft_v_i), &y_i)| {
+            *h_i = y_i * fft_v_i;
+        });
 
     // inverse fft on h
     ecntt_inplace(
@@ -254,7 +260,6 @@ pub fn open_all_values(y: &Vec<G1>, f: &Vec<ScalarField>, batch_size: usize) -> 
         &ntt_cfg,
     )
     .unwrap();
-    // let mut h = top_domain.ifft(&h);
 
     h.truncate(batch_size);
 
@@ -265,7 +270,6 @@ pub fn open_all_values(y: &Vec<G1>, f: &Vec<ScalarField>, batch_size: usize) -> 
         &ntt_cfg,
     )
     .unwrap();
-    // let pi = domain.fft(&h);
 
     h
 }

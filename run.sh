@@ -30,11 +30,7 @@ while getopts ":d:b:h" opt; do
       echo "Invalid option: -$OPTARG" 1>&2
       show_help
       ;;
-    : )
-      echo "Invalid option: -$OPTARG requires an argument" 1>&2
-      show_help
-      ;;
-  esac
+esac
 done
 
 # Set default values if not provided
@@ -43,17 +39,19 @@ done
 
 DEVICE_TYPE_LOWERCASE=$(echo "$DEVICE_TYPE" | tr '[:upper:]' '[:lower:]')
 
-ICICLE_BACKEND_SOURCE_DIR="/home/guru_vamsi/icicle/lib/backend"
+# ICILE_DIR=$(realpath "/home/guru_vamsi/icicle-3.5.0/icicle")
+ICICLE_BACKEND_SOURCE_DIR="$/home/guru_vamsi/icicle/lib/backend"
 
 # Build Icicle and the example app that links to it
 if [ "$DEVICE_TYPE" != "CPU" ] && [ ! -d "${ICICLE_BACKEND_INSTALL_DIR}" ] && [ -d "${ICICLE_BACKEND_SOURCE_DIR}" ]; then
   echo "Building icicle and ${DEVICE_TYPE} backend"
   cargo build --release --features="${DEVICE_TYPE_LOWERCASE}"
-  export ICICLE_BACKEND_INSTALL_DIR=$(realpath "/home/guru_vamsi/icicle/lib/backend")
-  cargo bench --features="${DEVICE_TYPE_LOWERCASE}" --bench open_all -- --device-type "${DEVICE_TYPE}"
+  export ICICLE_BACKEND_INSTALL_DIR=$(realpath "../target/release/deps/icicle/lib/backend")
   # cargo run --release --features="${DEVICE_TYPE_LOWERCASE}" -- --device-type "${DEVICE_TYPE}"
+  cargo run --release --example endtoend --features="${DEVICE_TYPE_LOWERCASE}" -- --device-type "${DEVICE_TYPE}"
 else
-  echo "Building icicle without backend"
-  # export ICICLE_BACKEND_INSTALL_DIR="${ICICLE_BACKEND_INSTALL_DIR}"
-  cargo bench --bench open_all 
+  echo "Building icicle without backend, ICICLE_BACKEND_INSTALL_DIR=${ICICLE_BACKEND_INSTALL_DIR}"
+  export ICICLE_BACKEND_INSTALL_DIR="${ICICLE_BACKEND_INSTALL_DIR}"
+  # cargo run --release -- --device-type "${DEVICE_TYPE}"
+  cargo run --release --example endtoend -- --device-type "${DEVICE_TYPE}"
 fi
